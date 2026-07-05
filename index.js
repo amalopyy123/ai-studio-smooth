@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AI Studio Focus Mode
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  极致流畅 AI Studio 输入模式
+// @version      2.1
+// @description  Smooth prompt editor with a local prompt library for Google AI Studio.
 // @match        https://aistudio.google.com/*
 // @grant        none
 // ==/UserScript==
@@ -11,20 +11,473 @@
 
     'use strict';
 
-    ////////////////////////////////////////////////////////////
-    // 全局状态
-    ////////////////////////////////////////////////////////////
+    const STORAGE_KEY =
+        'ai-focus-prompt-library-v1';
 
     let panel = null;
     let textarea = null;
+    let promptNameInput = null;
+    let promptSearchInput = null;
+    let promptList = null;
 
     let cachedTarget = null;
-
     let focused = false;
+    let activePromptId = null;
+    let prompts = [];
 
-    ////////////////////////////////////////////////////////////
-    // 样式
-    ////////////////////////////////////////////////////////////
+    function createPromptId() {
+
+        return (
+            'prompt-' +
+            Date.now().toString(36) +
+            '-' +
+            Math.random().toString(36).slice(2, 8)
+        );
+    }
+
+    function getTimestamp() {
+
+        return new Date().toISOString();
+    }
+
+    function formatDate(value) {
+
+        const date =
+            new Date(value);
+
+        if (
+            Number.isNaN(date.getTime())
+        ) {
+            return '';
+        }
+
+        return date.toLocaleString(
+            undefined,
+            {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            }
+        );
+    }
+
+    function loadPrompts() {
+
+        try {
+
+            const raw =
+                localStorage.getItem(STORAGE_KEY);
+
+            const parsed =
+                raw
+                    ? JSON.parse(raw)
+                    : [];
+
+            prompts =
+                Array.isArray(parsed)
+                    ? parsed.filter((item) => {
+
+                        return (
+                            item &&
+                            typeof item.id === 'string' &&
+                            typeof item.name === 'string' &&
+                            typeof item.content === 'string'
+                        );
+                    })
+                    : [];
+
+        } catch (error) {
+
+            prompts = [];
+        }
+    }
+
+    function savePrompts() {
+
+        localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify(prompts)
+        );
+    }
+
+    function getPromptName() {
+
+        const explicitName =
+            promptNameInput.value.trim();
+
+        if (explicitName) {
+            return explicitName;
+        }
+
+        const firstLine =
+            textarea.value
+                .trim()
+                .split(/\r?\n/)
+                .find(Boolean);
+
+        if (firstLine) {
+            return firstLine.slice(0, 60);
+        }
+
+        return 'Untitled prompt';
+    }
+
+    function getVisiblePrompts() {
+
+        const query =
+            promptSearchInput.value
+                .trim()
+                .toLowerCase();
+
+        const sorted =
+            [...prompts].sort((a, b) => {
+
+                return (
+                    new Date(b.updatedAt || b.createdAt).getTime() -
+                    new Date(a.updatedAt || a.createdAt).getTime()
+                );
+            });
+
+        if (!query) {
+            return sorted;
+        }
+
+        return sorted.filter((prompt) => {
+
+            return (
+                prompt.name.toLowerCase().includes(query) ||
+                prompt.content.toLowerCase().includes(query)
+            );
+        });
+    }
+
+    function renderPromptList() {
+
+        if (!promptList) {
+            return;
+        }
+
+        promptList.textContent = '';
+
+        const visiblePrompts =
+            getVisiblePrompts();
+
+        if (!visiblePrompts.length) {
+
+            const empty =
+                document.createElement('div');
+
+            empty.className =
+                'ai-prompt-empty';
+
+            empty.textContent =
+                promptSearchInput.value.trim()
+                    ? 'No matching prompts'
+                    : 'No saved prompts';
+
+            promptList.appendChild(empty);
+
+            return;
+        }
+
+        for (const prompt of visiblePrompts) {
+
+            const item =
+                document.createElement('div');
+
+            item.className =
+                'ai-prompt-item';
+
+            if (
+                prompt.id === activePromptId
+            ) {
+                item.classList.add('active');
+            }
+
+            const name =
+                document.createElement('span');
+
+            name.className =
+                'ai-prompt-item-name';
+
+            name.textContent =
+                prompt.name;
+
+            const meta =
+                document.createElement('span');
+
+            meta.className =
+                'ai-prompt-item-meta';
+
+            meta.textContent =
+                formatDate(prompt.updatedAt || prompt.createdAt);
+
+            const preview =
+                document.createElement('span');
+
+            preview.className =
+                'ai-prompt-item-preview';
+
+            preview.textContent =
+                prompt.content.replace(/\s+/g, ' ').trim();
+
+            const content =
+                document.createElement('button');
+
+            content.type =
+                'button';
+
+            content.className =
+                'ai-prompt-item-content';
+
+            content.title =
+                'Append prompt';
+
+            content.appendChild(name);
+            content.appendChild(meta);
+            content.appendChild(preview);
+
+            const actions =
+                document.createElement('div');
+
+            actions.className =
+                'ai-prompt-item-actions';
+
+            const editButton =
+                document.createElement('button');
+
+            editButton.type =
+                'button';
+
+            editButton.className =
+                'ai-prompt-item-action';
+
+            editButton.textContent =
+                'Edit';
+
+            editButton.title =
+                'Edit this prompt';
+
+            const deleteButton =
+                document.createElement('button');
+
+            deleteButton.type =
+                'button';
+
+            deleteButton.className =
+                'ai-prompt-item-action danger';
+
+            deleteButton.textContent =
+                'Del';
+
+            deleteButton.title =
+                'Delete this prompt';
+
+            actions.appendChild(editButton);
+            actions.appendChild(deleteButton);
+
+            item.appendChild(content);
+            item.appendChild(actions);
+
+            content.addEventListener(
+                'click',
+                () => {
+
+                    appendPromptToEditor(prompt.id);
+                }
+            );
+
+            editButton.addEventListener(
+                'click',
+                () => {
+
+                    editPrompt(prompt.id);
+                }
+            );
+
+            deleteButton.addEventListener(
+                'click',
+                () => {
+
+                    deletePrompt(prompt.id);
+                }
+            );
+
+            promptList.appendChild(item);
+        }
+    }
+
+    function appendPromptToEditor(id) {
+
+        const prompt =
+            prompts.find((item) => {
+
+                return item.id === id;
+            });
+
+        if (!prompt) {
+            return;
+        }
+
+        const currentValue =
+            textarea.value;
+
+        const separator =
+            currentValue.trim()
+                ? '\n\n'
+                : '';
+
+        textarea.value =
+            currentValue + separator + prompt.content;
+
+        activePromptId = null;
+
+        textarea.selectionStart =
+            textarea.value.length;
+
+        textarea.selectionEnd =
+            textarea.value.length;
+
+        renderPromptList();
+        syncToAIStudio();
+        textarea.focus();
+    }
+
+    function editPrompt(id) {
+
+        const prompt =
+            prompts.find((item) => {
+
+                return item.id === id;
+            });
+
+        if (!prompt) {
+            return;
+        }
+
+        activePromptId =
+            prompt.id;
+
+        promptNameInput.value =
+            prompt.name;
+
+        textarea.value =
+            prompt.content;
+
+        renderPromptList();
+        textarea.focus();
+    }
+
+    function clearEditor() {
+
+        activePromptId = null;
+        promptNameInput.value = '';
+        textarea.value = '';
+
+        renderPromptList();
+        textarea.focus();
+    }
+
+    function createPrompt() {
+
+        const content =
+            textarea.value;
+
+        if (!content.trim()) {
+            textarea.focus();
+            return;
+        }
+
+        const now =
+            getTimestamp();
+
+        const prompt =
+            {
+                id: createPromptId(),
+                name: getPromptName(),
+                content,
+                createdAt: now,
+                updatedAt: now
+            };
+
+        prompts.push(prompt);
+        activePromptId = prompt.id;
+        promptNameInput.value = prompt.name;
+
+        savePrompts();
+        renderPromptList();
+    }
+
+    function updatePrompt() {
+
+        if (!activePromptId) {
+            textarea.focus();
+            return;
+        }
+
+        const prompt =
+            prompts.find((item) => {
+
+                return item.id === activePromptId;
+            });
+
+        if (!prompt) {
+            activePromptId = null;
+            textarea.focus();
+            return;
+        }
+
+        prompt.name =
+            getPromptName();
+
+        prompt.content =
+            textarea.value;
+
+        prompt.updatedAt =
+            getTimestamp();
+
+        promptNameInput.value =
+            prompt.name;
+
+        savePrompts();
+        renderPromptList();
+    }
+
+    function deletePrompt(id = activePromptId) {
+
+        if (!id) {
+            return;
+        }
+
+        const prompt =
+            prompts.find((item) => {
+
+                return item.id === id;
+            });
+
+        if (
+            prompt &&
+            !window.confirm('Delete this saved prompt?')
+        ) {
+            return;
+        }
+
+        prompts =
+            prompts.filter((item) => {
+
+                return item.id !== id;
+            });
+
+        savePrompts();
+
+        if (activePromptId === id) {
+            clearEditor();
+            return;
+        }
+
+        renderPromptList();
+    }
 
     function injectStyle() {
 
@@ -37,7 +490,7 @@
         }
 
         const style =
-              document.createElement('style');
+            document.createElement('style');
 
         style.id =
             'ai-focus-style';
@@ -47,103 +500,149 @@
             #ai-sync-panel {
 
                 position: fixed;
-
                 top: 120px;
                 right: 24px;
-
-                width: 360px;
-                height: 280px;
-
+                width: 420px;
+                height: 520px;
                 z-index: 999999999;
-
-                background:
-                    rgba(20,20,24,0.96);
-
-                border:
-                    1px solid rgba(255,255,255,0.08);
-
+                display: flex;
+                flex-direction: column;
+                background: rgba(20,20,24,0.96);
+                border: 1px solid rgba(255,255,255,0.08);
                 border-radius: 20px;
-
                 overflow: hidden;
-
-                box-shadow:
-                    0 20px 60px rgba(0,0,0,0.45);
-
-                backdrop-filter:
-                    blur(10px);
-
+                box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+                backdrop-filter: blur(10px);
                 transition:
                     width 0.2s ease,
                     height 0.2s ease,
                     transform 0.2s ease;
-
                 font-family:
                     Inter,
                     "Microsoft YaHei",
                     sans-serif;
-
-                contain:
-                    layout style paint;
-
-                transform:
-                    translateZ(0);
+                contain: layout style paint;
+                transform: translateZ(0);
             }
-
-            ////////////////////////////////////////////////////
-            // focus mode
-            ////////////////////////////////////////////////////
 
             #ai-sync-panel.focus-mode {
 
                 border-radius: 24px;
-
-                box-shadow:
-                    0 30px 100px rgba(0,0,0,0.6);
+                box-shadow: 0 30px 100px rgba(0,0,0,0.6);
             }
 
             #ai-sync-title {
 
                 padding: 14px 18px;
-
                 background:
                     linear-gradient(
                         135deg,
                         #4285f4,
                         #7b61ff
                     );
-
                 color: white;
-
                 font-size: 15px;
                 font-weight: 700;
-
                 user-select: none;
-
                 cursor: move;
+                flex: 0 0 auto;
+            }
+
+            #ai-sync-main {
+
+                flex: 1 1 auto;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+            }
+
+            #ai-sync-editor {
+
+                flex: 1 1 auto;
+                min-height: 250px;
+                display: flex;
+                flex-direction: column;
+                border-bottom: 1px solid rgba(255,255,255,0.06);
+            }
+
+            #ai-prompt-toolbar {
+
+                flex: 0 0 auto;
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto auto auto;
+                gap: 8px;
+                padding: 10px 12px;
+                border-bottom: 1px solid rgba(255,255,255,0.06);
+            }
+
+            #ai-prompt-name,
+            #ai-prompt-search {
+
+                min-width: 0;
+                height: 32px;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                outline: none;
+                background: rgba(255,255,255,0.07);
+                color: white;
+                padding: 0 10px;
+                box-sizing: border-box;
+                font-size: 12px;
+            }
+
+            #ai-prompt-name::placeholder,
+            #ai-prompt-search::placeholder {
+
+                color: rgba(255,255,255,0.4);
+            }
+
+            .ai-prompt-button {
+
+                height: 32px;
+                min-width: 44px;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                background: rgba(255,255,255,0.08);
+                color: rgba(255,255,255,0.88);
+                padding: 0 10px;
+                font-size: 12px;
+                font-weight: 600;
+                cursor: pointer;
+            }
+
+            .ai-prompt-button:hover {
+
+                background: rgba(255,255,255,0.14);
+                color: white;
+            }
+
+            .ai-prompt-button.primary {
+
+                background: #1a73e8;
+                border-color: #1a73e8;
+                color: white;
+            }
+
+            .ai-prompt-button.danger:hover {
+
+                background: rgba(234,67,53,0.22);
+                border-color: rgba(234,67,53,0.5);
             }
 
             #ai-sync-textarea {
 
+                flex: 1 1 auto;
                 width: 100%;
-                height: calc(100% - 90px);
-
+                min-height: 0;
                 border: none;
                 outline: none;
-
                 resize: none;
-
                 background: transparent;
-
                 color: white;
-
                 padding: 18px;
-
                 box-sizing: border-box;
-
                 font-size: 15px;
-
                 line-height: 1.8;
-
                 font-family:
                     Consolas,
                     Monaco,
@@ -152,36 +651,200 @@
 
             #ai-sync-textarea::placeholder {
 
-                color:
-                    rgba(255,255,255,0.4);
+                color: rgba(255,255,255,0.4);
+            }
+
+            #ai-prompt-library {
+
+                flex: 0 0 185px;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+            }
+
+            #ai-prompt-library-head {
+
+                flex: 0 0 auto;
+                display: grid;
+                grid-template-columns: minmax(0, 1fr);
+                gap: 8px;
+                padding: 10px 12px;
+                border-bottom: 1px solid rgba(255,255,255,0.06);
+            }
+
+            #ai-prompt-list {
+
+                flex: 1 1 auto;
+                min-height: 0;
+                overflow: auto;
+                padding: 8px;
+            }
+
+            .ai-prompt-item {
+
+                width: 100%;
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto;
+                gap: 8px;
+                margin: 0 0 6px;
+                padding: 8px;
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 8px;
+                background: rgba(255,255,255,0.05);
+                color: white;
+                text-align: left;
+            }
+
+            .ai-prompt-item:hover,
+            .ai-prompt-item.active {
+
+                background: rgba(66,133,244,0.18);
+                border-color: rgba(66,133,244,0.5);
+            }
+
+            .ai-prompt-item-content {
+
+                min-width: 0;
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) auto;
+                grid-template-rows: auto auto;
+                gap: 3px 8px;
+                padding: 0;
+                border: none;
+                background: transparent;
+                color: inherit;
+                text-align: left;
+                cursor: pointer;
+            }
+
+            .ai-prompt-item-name {
+
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            .ai-prompt-item-meta {
+
+                color: rgba(255,255,255,0.45);
+                font-size: 11px;
+                white-space: nowrap;
+            }
+
+            .ai-prompt-item-preview {
+
+                grid-column: 1 / -1;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                color: rgba(255,255,255,0.56);
+                font-size: 12px;
+            }
+
+            .ai-prompt-item-actions {
+
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+
+            .ai-prompt-item-action {
+
+                height: 26px;
+                min-width: 36px;
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 6px;
+                background: rgba(255,255,255,0.08);
+                color: rgba(255,255,255,0.78);
+                padding: 0 7px;
+                font-size: 11px;
+                font-weight: 600;
+                cursor: pointer;
+            }
+
+            .ai-prompt-item-action:hover {
+
+                background: rgba(255,255,255,0.14);
+                color: white;
+            }
+
+            .ai-prompt-item-action.danger:hover {
+
+                background: rgba(234,67,53,0.22);
+                border-color: rgba(234,67,53,0.5);
+            }
+
+            .ai-prompt-empty {
+
+                padding: 18px 10px;
+                color: rgba(255,255,255,0.45);
+                font-size: 12px;
+                text-align: center;
             }
 
             #ai-sync-footer {
 
-                height: 40px;
-
+                flex: 0 0 40px;
                 display: flex;
                 align-items: center;
-
-                padding-left: 16px;
-
-                border-top:
-                    1px solid rgba(255,255,255,0.06);
-
-                color:
-                    rgba(255,255,255,0.5);
-
+                padding: 0 16px;
+                border-top: 1px solid rgba(255,255,255,0.06);
+                color: rgba(255,255,255,0.5);
                 font-size: 12px;
+            }
+
+            #ai-sync-panel.focus-mode #ai-sync-main {
+
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) 320px;
+                grid-template-rows: minmax(0, 1fr);
+            }
+
+            #ai-sync-panel.focus-mode #ai-sync-editor {
+
+                min-height: 0;
+                border-right: 1px solid rgba(255,255,255,0.06);
+                border-bottom: none;
+            }
+
+            #ai-sync-panel.focus-mode #ai-prompt-library {
+
+                flex-basis: auto;
+            }
+
+            @media (max-width: 720px) {
+
+                #ai-sync-panel {
+
+                    right: 12px;
+                    width: calc(100vw - 24px);
+                    height: 540px;
+                }
+
+                #ai-prompt-toolbar {
+
+                    grid-template-columns: minmax(0, 1fr) auto auto;
+                }
+
+                #ai-prompt-toolbar .ai-prompt-button {
+
+                    min-width: 54px;
+                }
+
+                #ai-sync-panel.focus-mode #ai-sync-main {
+
+                    display: flex;
+                    flex-direction: column;
+                }
             }
 
         `;
 
         document.head.appendChild(style);
     }
-
-    ////////////////////////////////////////////////////////////
-    // 查找目标输入框
-    ////////////////////////////////////////////////////////////
 
     function findTargetTextarea() {
 
@@ -195,27 +858,26 @@
         const selectors = [
 
             'textarea',
-
             '[contenteditable="true"]',
-
             'ms-chat-input textarea'
         ];
 
         for (const selector of selectors) {
 
             const elements =
-                  document.querySelectorAll(selector);
+                document.querySelectorAll(selector);
 
             for (const el of elements) {
 
                 if (
-                    el.id === 'ai-sync-textarea'
+                    panel &&
+                    panel.contains(el)
                 ) {
                     continue;
                 }
 
                 const rect =
-                      el.getBoundingClientRect();
+                    el.getBoundingClientRect();
 
                 if (
                     rect.bottom >
@@ -232,26 +894,22 @@
         return null;
     }
 
-    ////////////////////////////////////////////////////////////
-    // React兼容
-    ////////////////////////////////////////////////////////////
-
     function setNativeValue(
-    element,
-     value
+        element,
+        value
     ) {
 
         const prototype =
-              Object.getPrototypeOf(element);
+            Object.getPrototypeOf(element);
 
         const descriptor =
-              Object.getOwnPropertyDescriptor(
-                  prototype,
-                  'value'
-              );
+            Object.getOwnPropertyDescriptor(
+                prototype,
+                'value'
+            );
 
         const setter =
-              descriptor?.set;
+            descriptor?.set;
 
         if (setter) {
 
@@ -266,25 +924,17 @@
         }
     }
 
-    ////////////////////////////////////////////////////////////
-    // 同步
-    ////////////////////////////////////////////////////////////
-
     function syncToAIStudio() {
 
         const target =
-              findTargetTextarea();
+            findTargetTextarea();
 
         if (!target) {
             return;
         }
 
         const value =
-              textarea.value;
-
-        ////////////////////////////////////////////////////////
-        // textarea
-        ////////////////////////////////////////////////////////
+            textarea.value;
 
         if (
             target.tagName.toLowerCase()
@@ -308,10 +958,6 @@
             return;
         }
 
-        ////////////////////////////////////////////////////////
-        // contenteditable
-        ////////////////////////////////////////////////////////
-
         target.textContent =
             value;
 
@@ -327,16 +973,12 @@
         );
     }
 
-    ////////////////////////////////////////////////////////////
-    // 隐藏/恢复 app-root
-    ////////////////////////////////////////////////////////////
-
     function setAppVisible(visible) {
 
         const app =
-              document.querySelector(
-                  'app-root'
-              );
+            document.querySelector(
+                'app-root'
+            );
 
         if (!app) {
             return;
@@ -344,13 +986,9 @@
 
         app.style.display =
             visible
-            ? ''
-        : 'none';
+                ? ''
+                : 'none';
     }
-
-    ////////////////////////////////////////////////////////////
-    // focus mode
-    ////////////////////////////////////////////////////////////
 
     function enterFocusMode() {
 
@@ -360,33 +998,16 @@
             'focus-mode'
         );
 
-        ////////////////////////////////////////////////////////
-        // 直接修改 style
-        ////////////////////////////////////////////////////////
-
         panel.style.left = '50%';
-
         panel.style.top = '50%';
-
         panel.style.right = 'auto';
-
-        panel.style.width = '70vw';
-
-        panel.style.height = '70vh';
-
+        panel.style.width = '78vw';
+        panel.style.height = '76vh';
         panel.style.transform =
             'translate(-50%, -50%)';
 
-        ////////////////////////////////////////////////////////
-        // 隐藏 AI Studio
-        ////////////////////////////////////////////////////////
-
         setAppVisible(false);
     }
-
-    ////////////////////////////////////////////////////////////
-    // exit focus mode
-    ////////////////////////////////////////////////////////////
 
     function exitFocusMode() {
 
@@ -396,38 +1017,42 @@
             'focus-mode'
         );
 
-        ////////////////////////////////////////////////////////
-        // 恢复 style
-        ////////////////////////////////////////////////////////
-
         panel.style.transform = '';
-
         panel.style.width = '';
-
         panel.style.height = '';
-
         panel.style.top = '120px';
-
         panel.style.right = '24px';
-
         panel.style.left = '';
 
-        ////////////////////////////////////////////////////////
-        // 恢复 AI Studio
-        ////////////////////////////////////////////////////////
-
         setAppVisible(true);
-
-        ////////////////////////////////////////////////////////
-        // 同步内容
-        ////////////////////////////////////////////////////////
-
         syncToAIStudio();
     }
 
-    ////////////////////////////////////////////////////////////
-    // 创建UI
-    ////////////////////////////////////////////////////////////
+    function createButton(
+        label,
+        className,
+        handler
+    ) {
+
+        const button =
+            document.createElement('button');
+
+        button.type =
+            'button';
+
+        button.className =
+            'ai-prompt-button ' + className;
+
+        button.textContent =
+            label;
+
+        button.addEventListener(
+            'click',
+            handler
+        );
+
+        return button;
+    }
 
     function createPanel() {
 
@@ -439,18 +1064,16 @@
             return;
         }
 
+        loadPrompts();
+
         panel =
             document.createElement('div');
 
         panel.id =
             'ai-sync-panel';
 
-        ////////////////////////////////////////////////////////
-        // title
-        ////////////////////////////////////////////////////////
-
         const title =
-              document.createElement('div');
+            document.createElement('div');
 
         title.id =
             'ai-sync-title';
@@ -458,9 +1081,61 @@
         title.textContent =
             'Focus Prompt';
 
-        ////////////////////////////////////////////////////////
-        // textarea
-        ////////////////////////////////////////////////////////
+        const main =
+            document.createElement('div');
+
+        main.id =
+            'ai-sync-main';
+
+        const editor =
+            document.createElement('section');
+
+        editor.id =
+            'ai-sync-editor';
+
+        const toolbar =
+            document.createElement('div');
+
+        toolbar.id =
+            'ai-prompt-toolbar';
+
+        promptNameInput =
+            document.createElement('input');
+
+        promptNameInput.id =
+            'ai-prompt-name';
+
+        promptNameInput.type =
+            'text';
+
+        promptNameInput.placeholder =
+            'Prompt name';
+
+        toolbar.appendChild(promptNameInput);
+
+        toolbar.appendChild(
+            createButton(
+                'New',
+                '',
+                clearEditor
+            )
+        );
+
+        toolbar.appendChild(
+            createButton(
+                'Save',
+                'primary',
+                createPrompt
+            )
+        );
+
+        toolbar.appendChild(
+            createButton(
+                'Update',
+                '',
+                updatePrompt
+            )
+        );
 
         textarea =
             document.createElement('textarea');
@@ -469,84 +1144,68 @@
             'ai-sync-textarea';
 
         textarea.placeholder =
-            '在这里输入 Prompt...';
+            'Write your prompt here...';
 
-        ////////////////////////////////////////////////////////
-        // footer
-        ////////////////////////////////////////////////////////
+        editor.appendChild(toolbar);
+        editor.appendChild(textarea);
+
+        const library =
+            document.createElement('section');
+
+        library.id =
+            'ai-prompt-library';
+
+        const libraryHead =
+            document.createElement('div');
+
+        libraryHead.id =
+            'ai-prompt-library-head';
+
+        promptSearchInput =
+            document.createElement('input');
+
+        promptSearchInput.id =
+            'ai-prompt-search';
+
+        promptSearchInput.type =
+            'search';
+
+        promptSearchInput.placeholder =
+            'Search saved prompts';
+
+        libraryHead.appendChild(promptSearchInput);
+
+        promptList =
+            document.createElement('div');
+
+        promptList.id =
+            'ai-prompt-list';
+
+        library.appendChild(libraryHead);
+        library.appendChild(promptList);
 
         const footer =
-              document.createElement('div');
+            document.createElement('div');
 
         footer.id =
             'ai-sync-footer';
 
         footer.textContent =
-            'Google AI Studio';
+            'Local prompt library';
 
-        ////////////////////////////////////////////////////////
-        // append
-        ////////////////////////////////////////////////////////
+        main.appendChild(editor);
+        main.appendChild(library);
 
         panel.appendChild(title);
-
-        panel.appendChild(textarea);
-
+        panel.appendChild(main);
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
-
-        ////////////////////////////////////////////////////////
-        // focus
-        ////////////////////////////////////////////////////////
 
         textarea.addEventListener(
             'focus',
             enterFocusMode
         );
-
-        ////////////////////////////////////////////////////////
-        // blur
-        ////////////////////////////////////////////////////////
-
-        // textarea.addEventListener(
-        //     'blur',
-        //     exitFocusMode
-        // );
-        document.addEventListener(
-            'mousedown',
-            (e) => {
-
-                ////////////////////////////////////////////////////////
-                // 非 focus mode
-                ////////////////////////////////////////////////////////
-
-                if (!focused) {
-                    return;
-                }
-
-                ////////////////////////////////////////////////////////
-                // 点击 panel 内部
-                ////////////////////////////////////////////////////////
-
-                if (
-                    panel.contains(e.target)
-                ) {
-                    return;
-                }
-
-                ////////////////////////////////////////////////////////
-                // 点击外部
-                ////////////////////////////////////////////////////////
-
-                exitFocusMode();
-            }
-        );
-
-
-        ////////////////////////////////////////////////////////
-        // ESC退出 focus mode
-        ////////////////////////////////////////////////////////
 
         textarea.addEventListener(
             'keydown',
@@ -557,26 +1216,50 @@
                 ) {
 
                     exitFocusMode();
+                    return;
+                }
+
+                if (
+                    (e.ctrlKey || e.metaKey) &&
+                    e.key.toLowerCase() === 's'
+                ) {
+
+                    e.preventDefault();
+                    updatePrompt();
                 }
             }
         );
 
-        ////////////////////////////////////////////////////////
-        // 拖拽
-        ////////////////////////////////////////////////////////
+        promptSearchInput.addEventListener(
+            'input',
+            renderPromptList
+        );
+
+        document.addEventListener(
+            'mousedown',
+            (e) => {
+
+                if (!focused) {
+                    return;
+                }
+
+                if (
+                    panel.contains(e.target)
+                ) {
+                    return;
+                }
+
+                exitFocusMode();
+            }
+        );
 
         let dragging = false;
-
         let offsetX = 0;
         let offsetY = 0;
 
         title.addEventListener(
             'mousedown',
             (e) => {
-
-                //////////////////////////////////////////////////
-                // focus mode 禁止拖拽
-                //////////////////////////////////////////////////
 
                 if (focused) {
                     return;
@@ -585,7 +1268,7 @@
                 dragging = true;
 
                 const rect =
-                      panel.getBoundingClientRect();
+                    panel.getBoundingClientRect();
 
                 offsetX =
                     e.clientX - rect.left;
@@ -629,42 +1312,35 @@
                     '';
             }
         );
+
+        renderPromptList();
     }
 
-    ////////////////////////////////////////////////////////////
-    // 初始化
-    ////////////////////////////////////////////////////////////
-
     injectStyle();
-
     createPanel();
 
-    ////////////////////////////////////////////////////////////
-    // SPA兼容
-    ////////////////////////////////////////////////////////////
-
     const observer =
-          new MutationObserver(() => {
+        new MutationObserver(() => {
 
-              if (
-                  !document.getElementById(
-                      'ai-sync-panel'
-                  )
-              ) {
+            if (
+                !document.getElementById(
+                    'ai-sync-panel'
+                )
+            ) {
 
-                  createPanel();
-              }
+                createPanel();
+            }
 
-              if (
-                  cachedTarget &&
-                  !document.contains(
-                      cachedTarget
-                  )
-              ) {
+            if (
+                cachedTarget &&
+                !document.contains(
+                    cachedTarget
+                )
+            ) {
 
-                  cachedTarget = null;
-              }
-          });
+                cachedTarget = null;
+            }
+        });
 
     observer.observe(
         document.documentElement,
