@@ -503,6 +503,18 @@
                 -webkit-backdrop-filter: none !important;
             }
 
+            .ai-truncate-button.armed {
+
+                color: #ff6b6b;
+                background: rgba(255,107,107,0.14);
+            }
+
+            .ai-truncate-button:disabled {
+
+                opacity: 0.5;
+                cursor: progress;
+            }
+
             #ai-sync-panel {
 
                 position: fixed;
@@ -1321,8 +1333,275 @@
         renderPromptList();
     }
 
+    function sleep(ms) {
+
+        return new Promise(
+            (resolve) => setTimeout(resolve, ms)
+        );
+    }
+
+    async function waitFor(
+        check,
+        timeout = 3000
+    ) {
+
+        const start =
+            Date.now();
+
+        while (
+            Date.now() - start < timeout
+        ) {
+
+            const result =
+                check();
+
+            if (result) {
+                return result;
+            }
+
+            await sleep(50);
+        }
+
+        return null;
+    }
+
+    function getChatTurns() {
+
+        return [
+            ...document.querySelectorAll(
+                'ms-chat-turn'
+            )
+        ];
+    }
+
+    async function deleteChatTurn(turn) {
+
+        const optionsButton =
+            turn.querySelector(
+                'button[aria-label="Open options"]'
+            );
+
+        if (!optionsButton) {
+            return false;
+        }
+
+        optionsButton.click();
+
+        const deleteItem =
+            await waitFor(() =>
+                [
+                    ...document.querySelectorAll(
+                        '.cdk-overlay-container [role="menuitem"]'
+                    )
+                ].find((item) =>
+                    item.textContent.includes('Delete')
+                )
+            );
+
+        if (!deleteItem) {
+
+            document.body.dispatchEvent(
+                new KeyboardEvent(
+                    'keydown',
+                    {
+                        key: 'Escape',
+                        bubbles: true
+                    }
+                )
+            );
+
+            return false;
+        }
+
+        deleteItem.click();
+
+        return Boolean(
+            await waitFor(() =>
+                !document.contains(turn)
+            )
+        );
+    }
+
+    let truncating = false;
+
+    // Delete from the last turn upward so remaining turns never shift.
+    async function truncateFrom(turn, button) {
+
+        if (truncating) {
+            return;
+        }
+
+        truncating = true;
+        button.disabled = true;
+
+        try {
+
+            let turns =
+                getChatTurns();
+
+            while (
+                turns.includes(turn)
+            ) {
+
+                const last =
+                    turns[turns.length - 1];
+
+                if (
+                    !(await deleteChatTurn(last))
+                ) {
+
+                    console.warn(
+                        '[AI Focus] Failed to delete turn',
+                        last.id
+                    );
+
+                    break;
+                }
+
+                turns =
+                    getChatTurns();
+            }
+
+        } finally {
+
+            truncating = false;
+            button.disabled = false;
+        }
+    }
+
+    function createTruncateButton(turn) {
+
+        const button =
+            document.createElement('button');
+
+        button.type =
+            'button';
+
+        button.className =
+            'ai-truncate-button ms-button-borderless ms-button-icon';
+
+        button.title =
+            'Delete this and all turns below';
+
+        // Inline SVG: AI Studio's icon font is subset and lacks delete_sweep,
+        // and Trusted Types blocks innerHTML, so build it node by node.
+        const SVG_NS =
+            'http://www.w3.org/2000/svg';
+
+        const svg =
+            document.createElementNS(SVG_NS, 'svg');
+
+        svg.setAttribute('width', '20');
+        svg.setAttribute('height', '20');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'currentColor');
+
+        const path =
+            document.createElementNS(SVG_NS, 'path');
+
+        path.setAttribute(
+            'd',
+            'M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12z'
+        );
+
+        svg.appendChild(path);
+        button.appendChild(svg);
+
+        let disarmTimer = null;
+
+        button.addEventListener(
+            'click',
+            (e) => {
+
+                e.stopPropagation();
+
+                if (
+                    !button.classList.contains('armed')
+                ) {
+
+                    const turns =
+                        getChatTurns();
+
+                    const count =
+                        turns.length -
+                        turns.indexOf(turn);
+
+                    button.classList.add('armed');
+
+                    button.title =
+                        `Click again to delete ${count} turn(s)`;
+
+                    disarmTimer =
+                        setTimeout(() => {
+
+                            button.classList.remove('armed');
+
+                            button.title =
+                                'Delete this and all turns below';
+
+                        }, 3000);
+
+                    return;
+                }
+
+                clearTimeout(disarmTimer);
+                button.classList.remove('armed');
+
+                truncateFrom(
+                    turn,
+                    button
+                );
+            }
+        );
+
+        return button;
+    }
+
+    function decorateChatTurns() {
+
+        for (const turn of getChatTurns()) {
+
+            const options =
+                turn.querySelector(
+                    'ms-chat-turn-options'
+                );
+
+            if (
+                !options ||
+                options.parentElement.querySelector(
+                    '.ai-truncate-button'
+                )
+            ) {
+                continue;
+            }
+
+            options.parentElement.insertBefore(
+                createTruncateButton(turn),
+                options
+            );
+        }
+    }
+
+    let decorateScheduled = false;
+
+    function scheduleDecorate() {
+
+        if (decorateScheduled) {
+            return;
+        }
+
+        decorateScheduled = true;
+
+        requestAnimationFrame(() => {
+
+            decorateScheduled = false;
+            decorateChatTurns();
+        });
+    }
+
     injectStyle();
     createPanel();
+    decorateChatTurns();
 
     const observer =
         new MutationObserver(() => {
@@ -1345,6 +1624,8 @@
 
                 cachedTarget = null;
             }
+
+            scheduleDecorate();
         });
 
     observer.observe(
