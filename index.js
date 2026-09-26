@@ -497,6 +497,12 @@
 
         style.textContent = `
 
+            /* backdrop-filter is extremely slow under software rendering */
+            * {
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+            }
+
             #ai-sync-panel {
 
                 position: fixed;
@@ -512,7 +518,6 @@
                 border-radius: 20px;
                 overflow: hidden;
                 box-shadow: 0 20px 60px rgba(0,0,0,0.45);
-                backdrop-filter: blur(10px);
                 transition:
                     width 0.2s ease,
                     height 0.2s ease,
